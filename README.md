@@ -1,0 +1,2 @@
+# oracle_cloud_batch_app_sample
+OracleDBからデータを取得を取得後にスタブAPIから取得した値を新しい列に追加してCSVファイルに追加する
