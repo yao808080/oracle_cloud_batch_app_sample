@@ -1,0 +1,13 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "/__admin/health"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"status\": \"UP\"}"
+  }
+}

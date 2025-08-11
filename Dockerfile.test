@@ -1,0 +1,50 @@
+# Multi-stage build for testing
+FROM maven:3.9.4-eclipse-temurin-21 as builder
+
+# Set working directory
+WORKDIR /app
+
+# Copy pom.xml and source code
+COPY pom.xml .
+COPY src ./src
+
+# Build application with tests
+RUN mvn clean compile test-compile -DskipTests
+
+# Final stage - Runtime
+FROM eclipse-temurin:21-jre-jammy
+
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy compiled application from builder stage
+COPY --from=builder /app/target/classes ./classes
+COPY --from=builder /app/target/test-classes ./test-classes
+COPY --from=builder /app/target/dependency ./lib
+
+# Create necessary directories
+RUN mkdir -p /app/output /app/logs && \
+    chown -R appuser:appuser /app
+
+# Switch to app user
+USER appuser
+
+# Expose port
+EXPOSE 8080
+
+# Set environment variables
+ENV JAVA_OPTS="-Xms128m -Xmx512m"
+ENV MICRONAUT_ENVIRONMENTS="test,integration"
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Start application
+CMD java $JAVA_OPTS -cp "classes:test-classes:lib/*" com.example.csvbatch.Main

@@ -4,17 +4,19 @@
 
 ### 1.1 システム要件
 - **OS**: Linux (Ubuntu 20.04+推奨) / Windows 10+ / macOS 11+
+- **Java**: OpenJDK 21 (Helidon MP 4.0.11対応)
+- **Maven**: 3.9+
 - **Docker**: 20.10.0以上
-- **Docker Compose**: 2.0.0以上
-- **メモリ**: 最小4GB、推奨8GB以上
-- **ディスク容量**: 最小10GB、推奨20GB以上
+- **Docker Compose**: 3.8+
+- **メモリ**: 最小2GB、推奨4GB以上
+- **ディスク容量**: 最小5GB、推奨10GB以上
 - **OCI CLI**: 3.0以上（本番デプロイ用）
 - **kubectl**: 1.25以上（OKEデプロイ用）
 
 ### 1.2 ネットワーク要件
-- **ポート**: 1521, 8080, 8081が利用可能であること
+- **ポート**: 1521(Oracle DB), 8080(Application), 8081(SOAP Stub), 8082(OCI Local Testing), 3000(Grafana), 9090(Prometheus)
 - **インターネット接続**: Dockerイメージダウンロードのため必要
-- **OCI接続**: Object Storage、Container Registry等へのアクセス
+- **OCI接続**: Object Storage、Container Registry、Autonomous Database等へのアクセス
 
 ## 2. 事前準備
 
@@ -40,16 +42,24 @@ cd oracle_cloud_batch_app_sample
 ### 2.3 ディレクトリ構造確認
 ```
 oracle_cloud_batch_app_sample/
-├── docker-compose.yml
-├── docker-compose.oci.yml  # OCI環境用
-├── Dockerfile
-├── pom.xml
-├── src/
-├── soap-stub/
-├── oracle-init/
-├── output/
-└── config/
-    └── wallet/  # Autonomous Database用（オプション）
+├── docker-compose.yml                    # メイン構成
+├── docker-compose.test.yml              # テスト環境用
+├── docker-compose.test.minimal.yml      # 軽量テスト環境用
+├── Dockerfile                          # アプリケーション用
+├── Dockerfile.test                     # テスト用
+├── pom.xml                             # Mavenプロジェクト
+├── src/                                # ソースコード
+├── k8s/                                # Kubernetesマニフェスト
+│   ├── deployment.yaml
+│   ├── configmap.yaml
+│   └── secrets.yaml
+├── scripts/                            # 初期化スクリプト
+│   ├── init-postgresql.sql
+│   └── init-test-db.sql
+├── test-resources/                     # テストリソース
+│   └── wiremock/
+├── output/                             # CSV出力先
+└── logs/                               # ログ出力先
 ```
 
 ## 3. ローカル開発環境設定
@@ -58,30 +68,23 @@ oracle_cloud_batch_app_sample/
 ```bash
 # .envファイルを作成
 cat > .env << EOF
-# データベース設定（必須）
-ORACLE_PASSWORD=your_secure_oracle_password
+# Oracle Database設定（必須）
+ORACLE_PWD=oracle
 DB_USERNAME=csvuser
-DB_PASSWORD=your_secure_csvuser_password
-DB_URL=jdbc:oracle:thin:@oracle-db:1521/XEPDB1
+DB_PASSWORD=password
 
 # OCI設定（ローカル開発用）
-OCI_NAMESPACE=your_namespace
+OCI_NAMESPACE=namespace
 OCI_BUCKET=csv-export-bucket
 OCI_REGION=us-ashburn-1
+OCI_AUTH_METHOD=config_file
 
-# OCI認証（ローカルテスト用）
-# 実際のOCIアクセスには適切な認証設定が必要
-OCI_CONFIG_FILE=~/.oci/config
-OCI_PROFILE=DEFAULT
+# Monitoring設定
+GRAFANA_PASSWORD=admin
 
-# CSV出力設定
-CSV_OUTPUT_PATH=/app/output/result.csv
-CSV_EXPORT_STORAGE_UPLOAD=true
-CSV_EXPORT_LOCAL_BACKUP=true
-CSV_EXPORT_ENABLED=true
-
-# SOAP API設定
-SOAP_API_URL=http://soap-stub:8080/ws
+# Helidon設定
+MP_CONFIG_PROFILE=docker
+HELIDON_MP_LOG_LEVEL=INFO
 EOF
 
 # ファイル権限を制限
@@ -102,48 +105,61 @@ oci iam region list
 
 ### 3.3 出力ディレクトリ準備
 ```bash
-# 出力ディレクトリ作成
-mkdir -p output
-chmod 755 output
+# 必要なディレクトリ作成
+mkdir -p output logs
+chmod 755 output logs
 
-# Walletディレクトリ作成（Autonomous Database用）
-mkdir -p config/wallet
-chmod 700 config/wallet
+# テスト環境用ディレクトリ
+mkdir -p test-output test-logs
+chmod 755 test-output test-logs
+
+# WireMockスタブ用ディレクトリ確認
+ls -la test-resources/wiremock/
 ```
 
 ## 4. ローカル環境デプロイメント
 
 ### 4.1 基本デプロイメント
 ```bash
-# 1. 全サービス起動（初回はイメージビルドも実行）
+# 1. アプリケーションビルド（初回のみ）
+mvn clean package -DskipTests
+
+# 2. 全サービス起動（モニタリング含む）
 docker-compose up -d
 
-# 2. 起動状況確認
+# 3. 起動状況確認
 docker-compose ps
 
-# 3. ログ確認
+# 4. メインアプリケーションログ確認
 docker-compose logs -f csv-batch-processor
 ```
 
 ### 4.2 段階的起動（推奨）
 ```bash
-# 1. データベースを起動
+# 1. Oracle Database起動
 docker-compose up -d oracle-db
 
 # 2. データベースの健康状態確認
-docker-compose exec oracle-db sqlplus -L system/oracle@//localhost:1521/XE <<<'SELECT 1 FROM DUAL;'
+# Oracle XEの起動完了を待つ（数分かかる場合あり）
+docker-compose logs oracle-db | grep "DATABASE IS READY TO USE"
 
-# 3. SOAPスタブ起動
+# 3. SOAPスタブモック起動
 docker-compose up -d soap-stub
 
-# 4. SOAPスタブの健康状態確認
-curl -f http://localhost:8081/ws/employees.wsdl
+# 4. OCI Local Testing Framework起動（利用可能な場合）
+docker-compose up -d oci-local-testing
 
-# 5. メインアプリケーション起動
+# 5. SOAPスタブの健康状態確認
+curl -f http://localhost:8081/health || echo "WireMock is starting..."
+
+# 6. メインアプリケーション起動
 docker-compose up -d csv-batch-processor
 
-# 6. アプリケーション健康状態確認
-curl -f http://localhost:8080/actuator/health
+# 7. Helidonアプリケーションの健康状態確認
+curl -f http://localhost:8080/health/ready
+
+# 8. モニタリングサービス起動
+docker-compose up -d prometheus grafana
 ```
 
 ### 4.3 デプロイメント確認
@@ -151,15 +167,27 @@ curl -f http://localhost:8080/actuator/health
 # 全サービスの状態確認
 docker-compose ps
 
+# Helidon MPアプリケーションのヘルスチェック
+curl http://localhost:8080/health/live
+curl http://localhost:8080/health/ready
+
 # CSV出力ファイル確認（ローカル）
 ls -la output/
-cat output/result.csv
+# 出力ファイルがある場合
+cat output/result.csv 2>/dev/null || echo "CSV file not yet generated"
 
-# アプリケーション健康状態確認
-curl -f http://localhost:8080/actuator/health
+# CSVエクスポートAPIのテスト
+curl -X POST http://localhost:8080/api/csv/export
 
-# 処理ログ確認
-docker-compose logs csv-batch-processor | grep -E "CSV|Processing"
+# メトリクス確認
+curl http://localhost:8080/metrics
+
+# モニタリングダッシュボードアクセス
+echo "Grafana: http://localhost:3000 (admin/admin)"
+echo "Prometheus: http://localhost:9090"
+
+# アプリケーションログ確認
+docker-compose logs csv-batch-processor | grep -E "CSV|Processing|Helidon|Starting"
 ```
 
 ## 5. OCI環境へのデプロイメント
@@ -222,71 +250,62 @@ oci ce cluster create-kubeconfig \
 ```
 
 #### 5.3.2 Kubernetes マニフェスト
-```yaml
-# csv-batch-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: csv-batch-processor
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: csv-batch-processor
-  template:
-    metadata:
-      labels:
-        app: csv-batch-processor
-    spec:
-      containers:
-      - name: csv-batch-processor
-        image: <region>.ocir.io/<namespace>/csv-batch-processor:latest
-        ports:
-        - containerPort: 8080
-        env:
-        - name: DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: db-credentials
-              key: password
-        - name: OCI_BUCKET
-          value: csv-export-bucket
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "500m"
-          limits:
-            memory: "1Gi"
-            cpu: "1000m"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: csv-batch-service
-spec:
-  selector:
-    app: csv-batch-processor
-  ports:
-  - port: 80
-    targetPort: 8080
-  type: LoadBalancer
+
+実際のプロジェクトに含まれる `k8s/` ディレクトリのマニフェストファイルを使用：
+
+```bash
+# マニフェストファイルの構成確認
+ls -la k8s/
+# configmap.yaml    - 設定マップ
+# deployment.yaml   - デプロイメント、サービス、Ingress
+# secrets.yaml      - シークレット
+
+# マニフェストの主な特徴：
+# - Helidon MP 4.0.11対応
+# - セキュリティ強化設定（non-root user, read-only filesystem）
+# - OCI Workload Identity対応
+# - Prometheusメトリクス収集
+# - ヘルスチェック設定
+# - IngressでのSSL/TLS終端
 ```
+
+主な設定ポイント：
+- **レプリカ数**: 2個（可用性向上）
+- **リソース制限**: メモリ 512Mi-2Gi, CPU 250m-1000m
+- **ヘルスチェック**: `/health/live` と `/health/ready`
+- **セキュリティ**: 非non-rootユーザー、読み取り専用ファイルシステム
 
 #### 5.3.3 デプロイ実行
 ```bash
-# シークレット作成
-kubectl create secret generic db-credentials \
-    --from-literal=password=$DB_PASSWORD
+# 1. ネームスペース作成
+kubectl create namespace csv-batch
 
-# デプロイメント適用
-kubectl apply -f csv-batch-deployment.yaml
+# 2. サービスアカウント作成（OCI Workload Identity用）
+kubectl create serviceaccount csv-batch-sa -n csv-batch
 
-# 状態確認
-kubectl get pods
-kubectl get services
+# 3. ConfigMap適用
+kubectl apply -f k8s/configmap.yaml
 
-# ログ確認
-kubectl logs -f deployment/csv-batch-processor
+# 4. Secrets適用（実際の値で置き換え）
+# 事前にsecrets.yamlを編集し、base64エンコードされた値を設定
+kubectl apply -f k8s/secrets.yaml
+
+# 5. デプロイメント適用
+kubectl apply -f k8s/deployment.yaml
+
+# 6. 状態確認
+kubectl get all -n csv-batch
+kubectl get pods -n csv-batch -w
+
+# 7. ログ確認
+kubectl logs -f deployment/csv-batch-processor -n csv-batch
+
+# 8. ヘルスチェック確認
+kubectl exec -it deployment/csv-batch-processor -n csv-batch -- curl http://localhost:8080/health/ready
+
+# 9. サービスアクセス確認
+kubectl port-forward svc/csv-batch-processor-service 8080:80 -n csv-batch
+# 別ターミナルで: curl http://localhost:8080/health/ready
 ```
 
 ## 6. Autonomous Database接続設定
@@ -395,46 +414,87 @@ oci logging log create \
 
 ### 9.1 よくある問題と解決方法
 
-#### 9.1.1 Autonomous Database接続エラー
+#### 9.1.1 Helidon MPアプリケーション起動エラー
 ```bash
-# mTLS接続文字列の確認
-echo $DB_URL
+# Helidonアプリケーションのスタータス確認
+docker-compose logs csv-batch-processor | grep -E "Helidon|Starting|Ready"
 
-# ウォレット使用時の確認
-ls -la $TNS_ADMIN
-cat $TNS_ADMIN/tnsnames.ora
+# ヘルスチェックエンドポイント確認
+curl -v http://localhost:8080/health/live
+curl -v http://localhost:8080/health/ready
 
-# 接続テスト
-docker exec csv-batch-processor java -cp /app/app.jar TestConnection
+# MicroProfile Config設定の確認
+docker exec csv-batch-processor env | grep -E "MP_|HELIDON_"
+
+# ポート競合の確認
+netstat -tulpn | grep 8080
 ```
 
-#### 9.1.2 Object Storage権限エラー
+#### 9.1.2 Oracle Database接続エラー
 ```bash
-# インスタンスプリンシパル確認
-curl -H "Authorization: Bearer Oracle" http://169.254.169.254/opc/v2/instance/
+# Oracle XEコンテナの状態確認
+docker-compose logs oracle-db | grep -E "DATABASE IS READY|ERROR"
 
-# IAMポリシー確認
-oci iam policy list \
-    --compartment-id <compartment-ocid> \
-    --query "data[?name=='csv-batch-policy']"
+# データベース接続テスト
+docker exec csv-batch-processor curl -f http://localhost:8080/health/ready
 
-# バケット権限テスト
-oci os object list \
-    --bucket-name csv-export-bucket \
-    --auth instance_principal
+# データソース設定の確認
+docker exec csv-batch-processor env | grep -E "DB_|datasource"
+
+# Oracle接続テスト（コンテナ内から）
+docker exec oracle-db sqlplus -s csvuser/password@//localhost:1521/XEPDB1 <<< "SELECT 1 FROM DUAL;"
 ```
 
-#### 9.1.3 Container Instancesエラー
+#### 9.1.3 Object Storageエラー
 ```bash
-# コンテナログ確認
-oci container-instances container-instance get \
-    --container-instance-id <instance-ocid>
+# OCI Local Testing Frameworkの状態確認
+docker-compose ps oci-local-testing
+docker-compose logs oci-local-testing
 
-# イベント確認
-oci events event list \
-    --compartment-id <compartment-ocid> \
-    --start-time 2025-01-01T00:00:00Z \
-    --end-time 2025-12-31T23:59:59Z
+# LocalStackへのフォールバック（テスト環境）
+# docker-compose.test.minimal.ymlを使用した場合
+docker-compose -f docker-compose.test.minimal.yml logs localstack
+curl http://localhost:4566/_localstack/health
+
+# Object Storageヘルスチェック確認
+docker exec csv-batch-processor curl -f http://localhost:8080/health/ready
+
+# Object Storage設定の確認
+docker exec csv-batch-processor env | grep -E "OCI_|oci\."
+```
+
+#### 9.1.4 Docker Composeエラー
+```bash
+# 全サービスの状態確認
+docker-compose ps
+docker-compose logs --tail=50
+
+# ネットワークの確認
+docker network ls | grep csv-batch
+docker network inspect csv-batch-network
+
+# ボリュームの確認
+docker volume ls | grep csv-batch
+ls -la output/ logs/
+
+# リソース使用状況
+docker stats
+```
+
+#### 9.1.5 メトリクス・モニタリングエラー
+```bash
+# Prometheusメトリクスの確認
+curl http://localhost:8080/metrics
+
+# Prometheusサーバーの状態
+curl http://localhost:9090/-/ready
+
+# Grafanaアクセス確認
+curl -I http://localhost:3000
+
+# モニタリングサービスのログ
+docker-compose logs prometheus
+docker-compose logs grafana
 ```
 
 ### 9.2 デバッグ情報収集
@@ -442,52 +502,109 @@ oci events event list \
 # システム情報収集スクリプト
 cat > collect-debug.sh << 'EOF'
 #!/bin/bash
-echo "=== OCI Configuration ==="
-oci iam availability-domain list
+echo "=== System Information ==="
+date
+docker --version
+docker-compose --version
 
 echo "=== Container Status ==="
-kubectl get pods -o wide
+docker-compose ps
+docker stats --no-stream
 
-echo "=== Application Logs ==="
-kubectl logs deployment/csv-batch-processor --tail=100
+echo "=== Helidon Application Logs ==="
+docker-compose logs --tail=100 csv-batch-processor
 
-echo "=== Object Storage ==="
-oci os bucket list --compartment-id $COMPARTMENT_ID
+echo "=== Health Checks ==="
+curl -s http://localhost:8080/health/live || echo "Live check failed"
+curl -s http://localhost:8080/health/ready || echo "Ready check failed"
 
 echo "=== Network Configuration ==="
-kubectl get services
+docker network ls
+docker-compose port csv-batch-processor 8080
+
+echo "=== Environment Variables ==="
+docker exec csv-batch-processor env | grep -E "HELIDON|MP_|DB_|OCI_" | sort
+
+echo "=== File System ==="
+ls -la output/
+ls -la logs/
+
+echo "=== Metrics (if available) ==="
+curl -s http://localhost:8080/metrics | head -20
 EOF
 
 chmod +x collect-debug.sh
-./collect-debug.sh > debug-report.txt
+./collect-debug.sh > debug-report-$(date +%Y%m%d-%H%M%S).txt
 ```
 
 ## 10. 本番環境チェックリスト
 
-### 10.1 セキュリティ
-- [ ] OCI Vault設定完了
+### 10.1 アプリケーション
+- [ ] Helidon MP 4.0.11の本番用設定完了
+- [ ] MicroProfile Configプロファイル設定 (`production`)
+- [ ] JVMパラメーター最適化
+- [ ] ヘルスチェックエンドポイント動作確認
+- [ ] Resilience4j設定確認（リトライ、サーキットブレーカー）
+
+### 10.2 セキュリティ
+- [ ] OCI Vault統合完了（シークレット管理）
+- [ ] インスタンスプリンシパル認証設定
 - [ ] IAMポリシー最小権限化
-- [ ] ネットワークセキュリティリスト設定
-- [ ] 暗号化有効（TDE、Object Storage）
+- [ ] コンテナセキュリティ（non-root user, read-only filesystem）
+- [ ] ネットワークセキュリティルール設定
 
-### 10.2 可用性
-- [ ] マルチAD構成
-- [ ] 自動バックアップ設定
-- [ ] ヘルスチェック設定
-- [ ] 自動スケーリング設定
+### 10.3 データベース
+- [ ] Autonomous Database接続設定
+- [ ] UCPコネクションプール設定
+- [ ] mTLS接続設定（ウォレットまたはウォレットレス）
+- [ ] データベースバックアップ設定
 
-### 10.3 監視
-- [ ] OCI Monitoring設定
-- [ ] アラーム設定
-- [ ] ログ収集設定
-- [ ] パフォーマンスメトリクス
+### 10.4 可用性・スケーラビリティ
+- [ ] マルチインスタンス構成（OKEレプリカ: 2+）
+- [ ] ロードバランサー設定
+- [ ] 自動スケーリング設定（HPA/VPA）
+- [ ] Rolling Update戦略設定
 
-### 10.4 運用
+### 10.5 監視・メトリクス
+- [ ] Prometheusメトリクス収集設定
+- [ ] Grafanaダッシュボード設定
+- [ ] OCI Monitoring統合
+- [ ] アラーヨ通知設定
+- [ ] MicroProfile Metricsエンドポイント動作確認
+
+### 10.6 ログ管理
+- [ ] OCI Loggingサービス統合
+- [ ] ログローテーション設定
+- [ ] アプリケーションログレベル設定
+- [ ] セキュリティログ収集
+
+### 10.7 運用
+- [ ] CI/CDパイプライン構築
 - [ ] バックアップ・リストア手順
-- [ ] 障害対応手順書
+- [ ] 障害対応手順書（Helidon固有のトラブルシューティング含む）
 - [ ] 定期メンテナンス計画
-- [ ] 容量計画
+- [ ] 容量計画（メモリ、CPU、ストレージ）
 
 ---
 
-**最終更新**: 2025-08-06 - OCI PoC環境用デプロイメントガイド
+## 参考情報
+
+### 関連ファイル
+- `docker-compose.yml` - メインのサービス構成
+- `docker-compose.test.minimal.yml` - 軽量テスト環境
+- `Dockerfile` - Helidon MPアプリケーションのビルド設定
+- `k8s/deployment.yaml` - OKEデプロイメント用マニフェスト
+- `src/main/resources/META-INF/microprofile-config.properties` - MicroProfile設定
+
+### 技術仕様
+- **Helidon MP**: 4.0.11
+- **Java**: OpenJDK 21
+- **Maven**: 3.9+
+- **Oracle Database**: XE 21.3.0
+- **Docker**: 20.10.0+
+- **Kubernetes**: 1.25+
+
+---
+
+**最終更新**: 2025-08-07 - Helidon MP 4.0.11実装版デプロイメントガイド  
+**対応環境**: ローカル開発、Docker Compose、OKE (Oracle Kubernetes Engine)

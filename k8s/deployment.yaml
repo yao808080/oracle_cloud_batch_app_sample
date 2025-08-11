@@ -1,0 +1,204 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csv-batch-processor
+  namespace: csv-batch
+  labels:
+    app: csv-batch-processor
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: csv-batch-processor
+  template:
+    metadata:
+      labels:
+        app: csv-batch-processor
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: csv-batch-sa
+      securityContext:
+        fsGroup: 2000
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: csv-batch-processor
+        image: oci-region.ocir.io/namespace/csv-batch-processor:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        
+        # Environment Variables
+        env:
+        - name: MP_CONFIG_PROFILE
+          value: "kubernetes,production"
+        - name: OCI_REGION
+          value: "us-ashburn-1"
+        - name: OCI_NAMESPACE
+          valueFrom:
+            configMapKeyRef:
+              name: oci-config
+              key: namespace
+        - name: OCI_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: oci-config
+              key: bucket
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-secret
+              key: url
+        - name: DB_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: database-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-secret
+              key: password
+        - name: SOAP_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: soap.api.url
+        
+        # OCI Workload Identity
+        - name: OCI_RESOURCE_PRINCIPAL_VERSION
+          value: "2.2"
+        - name: OCI_RESOURCE_PRINCIPAL_REGION
+          value: "us-ashburn-1"
+        
+        # JVM Configuration
+        - name: JAVA_OPTS
+          value: "-server -Xms512m -Xmx2g -XX:+UseG1GC -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+        
+        # Health Checks
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+          
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Resource Limits
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        
+        # Security Context
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        
+        # Volume Mounts
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: cache-volume
+          mountPath: /app/cache
+        - name: output-volume
+          mountPath: /app/output
+        - name: logs-volume
+          mountPath: /app/logs
+        
+      # Volumes
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      - name: cache-volume
+        emptyDir: {}
+      - name: output-volume
+        emptyDir: {}
+      - name: logs-volume
+        emptyDir: {}
+      
+      # Node Selection
+      nodeSelector:
+        kubernetes.io/os: linux
+        
+      # Tolerations
+      tolerations:
+      - key: "oci.oraclecloud.com/cluster-autoscaler-node-template"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csv-batch-processor-service
+  namespace: csv-batch
+  labels:
+    app: csv-batch-processor
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: csv-batch-processor
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: csv-batch-processor-ingress
+  namespace: csv-batch
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - csv-batch.example.com
+    secretName: csv-batch-tls
+  rules:
+  - host: csv-batch.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: csv-batch-processor-service
+            port:
+              number: 80

@@ -1,0 +1,121 @@
+services:
+  # OCI Local Testing Framework for Object Storage testing
+  # NOTE: This service requires Oracle container registry access
+  # Alternative: Use localstack/localstack for S3-compatible storage testing
+  oci-local-testing:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"  # LocalStack main endpoint
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - oci-test-data:/tmp/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - test-network
+
+  # Oracle Database for integration testing
+  oracle-db:
+    image: gvenzl/oracle-xe:21-slim
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PASSWORD=test-password
+      - APP_USER=csvuser
+      - APP_USER_PASSWORD=csvpass
+    volumes:
+      - oracle-test-data:/opt/oracle/oradata
+      - ./scripts/init-test-db.sql:/container-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "healthcheck.sh"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+    networks:
+      - test-network
+
+  # SOAP API Stub for testing
+  soap-stub:
+    image: rodolpheche/wiremock:latest
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./test-resources/wiremock/mappings:/home/wiremock/mappings:ro
+      - ./test-resources/wiremock/__files:/home/wiremock/__files:ro
+    command: --port 8080 --verbose
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/__admin/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # CSV Batch Processor Application for E2E testing
+  # NOTE: Requires Docker build capability, comment out if Docker Desktop unavailable
+  csv-batch-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    ports:
+      - "8082:8080"
+    profiles:
+      - full-testing  # Only start with --profile full-testing
+    environment:
+      # Test Database Configuration
+      - DB_URL=jdbc:oracle:thin:@oracle-db:1521/XEPDB1
+      - DB_USERNAME=csvuser
+      - DB_PASSWORD=csvpass
+      
+      # Test SOAP API Configuration
+      - SOAP_API_URL=http://soap-stub:8080/ws
+      
+      # Test OCI Configuration
+      - OCI_NAMESPACE=test-namespace
+      - OCI_BUCKET=test-csv-export-bucket
+      - OCI_REGION=us-ashburn-1
+      - OCI_AUTH_METHOD=config_file
+      - OCI_OBJECTSTORAGE_ENDPOINT=http://oci-local-testing:8080
+      
+      # Test Application Configuration
+      - CSV_EXPORT_ENABLED=true
+      - CSV_EXPORT_STORAGE_UPLOAD=true
+      - CSV_BATCH_SIZE=100
+      - RUN_INTEGRATION_TESTS=true
+      
+      # Test Java Options
+      - JAVA_OPTS=-Xms128m -Xmx512m -XX:+UseContainerSupport
+      - MICRONAUT_ENVIRONMENTS=test,integration
+      
+    volumes:
+      - ./test-output:/app/output
+      - ./test-logs:/app/logs
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+      soap-stub:
+        condition: service_healthy
+      oci-local-testing:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - test-network
+
+volumes:
+  oracle-test-data:
+  oci-test-data:
+
+networks:
+  test-network:
+    driver: bridge

@@ -1,0 +1,172 @@
+# Test Configuration for CSV Batch Processor
+# Used during integration testing with Docker Compose
+
+server:
+  port: 8080
+  host: 0.0.0.0
+
+# Database Configuration for Testing
+datasource:
+  url: ${DB_URL:jdbc:oracle:thin:@localhost:1521/XEPDB1}
+  username: ${DB_USERNAME:csvuser}
+  password: ${DB_PASSWORD:csvpass}
+  driver-class-name: oracle.jdbc.OracleDriver
+  
+  # Connection Pool Settings for Testing
+  hikari:
+    maximum-pool-size: 5
+    minimum-idle: 1
+    connection-timeout: 10000
+    idle-timeout: 300000
+    max-lifetime: 600000
+    leak-detection-threshold: 60000
+
+# JPA/Hibernate Configuration for Testing
+jpa:
+  hibernate:
+    ddl-auto: validate
+    dialect: org.hibernate.dialect.Oracle12cDialect
+    format_sql: true
+  show-sql: true
+  properties:
+    hibernate:
+      jdbc:
+        batch_size: 20
+      order_inserts: true
+      order_updates: true
+
+# OCI Configuration for Testing
+oci:
+  auth:
+    method: ${OCI_AUTH_METHOD:config_file}
+    
+  object-storage:
+    namespace: ${OCI_NAMESPACE:test-namespace}
+    bucket: ${OCI_BUCKET:test-csv-export-bucket}
+    region: ${OCI_REGION:us-ashburn-1}
+    endpoint: ${OCI_OBJECTSTORAGE_ENDPOINT:}
+    
+  secrets:
+    vault-id: ${OCI_VAULT_ID:}
+    
+  monitoring:
+    namespace: ${OCI_MONITORING_NAMESPACE:csv-batch-test}
+    region: ${OCI_REGION:us-ashburn-1}
+
+# SOAP API Configuration for Testing
+soap:
+  employee-details:
+    endpoint: ${SOAP_API_URL:http://localhost:8081/ws}
+    timeout: 30000
+    retry:
+      max-attempts: 3
+      delay: 1000
+
+# CSV Export Configuration for Testing
+csv:
+  export:
+    enabled: ${CSV_EXPORT_ENABLED:true}
+    storage-upload: ${CSV_EXPORT_STORAGE_UPLOAD:true}
+    batch-size: ${CSV_BATCH_SIZE:100}
+    output-directory: ${CSV_OUTPUT_DIR:./test-output}
+    file-prefix: test-employee-export
+    
+  processing:
+    parallel: true
+    thread-pool-size: 2
+    
+# Resilience4j Configuration for Testing
+resilience4j:
+  retry:
+    instances:
+      csv-processing:
+        max-attempts: 3
+        wait-duration: 1000ms
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - java.sql.SQLException
+          - java.io.IOException
+          - com.oracle.bmc.model.BmcException
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+          
+  circuitbreaker:
+    instances:
+      database-access:
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 10s
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - java.sql.SQLException
+          - org.springframework.dao.DataAccessException
+          
+      object-storage-access:
+        failure-rate-threshold: 70
+        wait-duration-in-open-state: 15s
+        sliding-window-size: 8
+        minimum-number-of-calls: 4
+
+# Health Check Configuration
+management:
+  health:
+    enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# Logging Configuration for Testing
+logging:
+  level:
+    com.example.csvbatch: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    com.oracle.bmc: INFO
+    org.springframework.web: DEBUG
+    root: INFO
+  file:
+    path: ${LOG_FILE_PATH:./test-logs}
+    name: csv-batch-processor-test.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+
+# Test-specific Configuration
+test:
+  # Database test settings
+  database:
+    expected-employee-count: 5
+    test-employee-id: 1000
+    
+  # Integration test settings
+  integration:
+    timeout:
+      service-startup: 60000
+      api-call: 30000
+    
+    expected-services:
+      - oracle-db
+      - soap-stub
+      - oci-local-testing
+      
+  # Mock settings
+  mock:
+    soap-api:
+      enabled: true
+      delay-ms: 100
+      
+    oci-services:
+      enabled: true
+      
+# Feature flags for testing
+features:
+  csv-export: true
+  soap-integration: true
+  object-storage: true
+  monitoring: true

@@ -1,0 +1,31 @@
+{
+  "request": {
+    "method": "POST",
+    "url": "/ws",
+    "headers": {
+      "Content-Type": {
+        "contains": "text/xml"
+      },
+      "SOAPAction": {
+        "equalTo": "getEmployeeDetails"
+      }
+    },
+    "bodyPatterns": [
+      {
+        "contains": "getEmployeeDetailsRequest"
+      }
+    ]
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "text/xml;charset=UTF-8"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:tns=\"http://example.com/soap\">\n  <soap:Header/>\n  <soap:Body>\n    <tns:getEmployeeDetailsResponse>\n      <tns:employeeDetails>\n        <tns:employeeId>1001</tns:employeeId>\n        <tns:employeeName>田中太郎</tns:employeeName>\n        <tns:department>開発部</tns:department>\n        <tns:email>tanaka@example.com</tns:email>\n        <tns:hireDate>2020-04-01</tns:hireDate>\n        <tns:salary>500000</tns:salary>\n        <tns:level>Senior</tns:level>\n        <tns:bonus>150000</tns:bonus>\n        <tns:status>Active</tns:status>\n      </tns:employeeDetails>\n    </tns:getEmployeeDetailsResponse>\n  </soap:Body>\n</soap:Envelope>",
+    "delayDistribution": {
+      "type": "lognormal",
+      "median": 100,
+      "sigma": 0.1
+    }
+  }
+}

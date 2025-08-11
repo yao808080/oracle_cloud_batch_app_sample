@@ -1,0 +1,59 @@
+# Minimal Docker Compose for testing without heavy dependencies
+# This version only includes essential services for basic testing
+
+services:
+  # SOAP API Stub for testing - lightweight WireMock
+  soap-stub:
+    image: wiremock/wiremock:latest
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./test-resources/wiremock/mappings:/home/wiremock/mappings:ro
+      - ./test-resources/wiremock/__files:/home/wiremock/__files:ro
+    command: ["--port", "8080", "--verbose"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/__admin/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # OCI Emulator (Object Storage and other OCI services)
+  oci-emulator:
+    image: cameritelabs/oci-emulator:latest
+    ports:
+      - "12000:12000"
+    environment:
+      - OCI_NAMESPACE=test-namespace
+      - OCI_COMPARTMENT_ID=ocid1.compartment.oc1..test
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:12000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - test-network
+
+  # Simple test database (PostgreSQL as lightweight alternative)
+  test-db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    volumes:
+      - ./scripts/init-postgresql.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

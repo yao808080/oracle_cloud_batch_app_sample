@@ -3,14 +3,15 @@
 ## 目次
 1. [テスト概要](#1-テスト概要)
 2. [テスト環境構築](#2-テスト環境構築)
-3. [単体テスト仕様](#3-単体テスト仕様)
-4. [統合テスト仕様](#4-統合テスト仕様)
-5. [テストデータ管理](#5-テストデータ管理)
-6. [モック・スタブ管理](#6-モック・スタブ管理)
-7. [テスト実行とレポート](#7-テスト実行とレポート)
-8. [テストベストプラクティス](#8-テストベストプラクティス)
-9. [環境別テスト実行ガイド](#9-環境別テスト実行ガイド)
-10. [トラブルシューティング](#10-トラブルシューティング)
+3. [OCI Local Testing Framework代替案](#3-oci-local-testing-framework代替案)
+4. [単体テスト仕様](#4-単体テスト仕様)
+5. [統合テスト仕様](#5-統合テスト仕様)
+6. [テストデータ管理](#6-テストデータ管理)
+7. [モック・スタブ管理](#7-モック・スタブ管理)
+8. [テスト実行とレポート](#8-テスト実行とレポート)
+9. [テストベストプラクティス](#9-テストベストプラクティス)
+10. [環境別テスト実行ガイド](#10-環境別テスト実行ガイド)
+11. [トラブルシューティング](#11-トラブルシューティング)
 
 ---
 
@@ -27,9 +28,9 @@
 ### 1.2 テスト分類
 | テスト種別 | 対象 | 実行環境 | 実行時間目安 | テスト数 |
 |-----------|------|---------|-------------|---------|
-| 単体テスト | クラス単位、サービス、例外処理 | H2インメモリDB | 1-2分 | 70個 |
-| 統合テスト | DB、Object Storage、リトライ、エラーハンドリング | TestContainers + OCI Local Testing | 4-8分 | 18個 |
-| 合計 | 全体 | - | 8-12分 | 88個 |
+| 単体テスト | クラス単位、サービス、例外処理 | H2インメモリDB | 1-2分 | 30個 |
+| 統合テスト | DB、Object Storage、SOAP API、サービス統合 | PostgreSQL + LocalStack + WireMock | 3-5分 | 7個 |
+| 合計 | 全体 | - | 5-8分 | 37個 |
 
 ### 1.3 新機能のテスト対象
 - **例外処理**: ObjectStorageException、DataProcessingException、VaultSecretException
@@ -103,7 +104,194 @@ docker-compose -f docker-compose.test.yml down
 
 ---
 
-## 3. 単体テスト仕様
+## 3. OCI Local Testing Framework代替案
+
+### 3.1 問題の詳細
+
+`oracle/oci-local-testing:latest` イメージが利用できない問題の解決策を説明します。
+
+```bash
+docker run -d --name oci-local-testing -p 8080:8080 oracle/oci-local-testing:latest
+```
+
+**エラー:**
+```
+Unable to find image 'oracle/oci-local-testing:latest' locally
+docker: Error response from daemon: pull access denied for oracle/oci-local-testing, 
+repository does not exist or may require 'docker login'
+```
+
+### 3.2 原因
+
+1. **Oracle Container Registry認証が必要**: Oracle独自のイメージは認証が必要
+2. **イメージが非公開**: 一般のDocker Hubでは利用不可
+3. **企業向けライセンス**: 商用利用には別途契約が必要
+
+### 3.3 解決策
+
+#### 3.3.1 LocalStack（推奨）
+
+AWS互換のローカル環境で、S3互換のObject Storageをテスト可能：
+
+```bash
+# LocalStack起動（S3互換）
+docker run -d --name localstack \
+  -p 4566:4566 \
+  -e SERVICES=s3 \
+  -e DEBUG=1 \
+  localstack/localstack:latest
+
+# 動作確認
+curl http://localhost:4566/_localstack/health
+```
+
+#### 3.3.2 MinIO（Object Storage専用）
+
+OCI Object Storageの代替として軽量で高性能：
+
+```bash
+# MinIO起動
+docker run -d --name minio \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+
+# Web UI: http://localhost:9001
+```
+
+#### 3.3.3 WireMock（REST API Mock）
+
+OCI REST API エンドポイントをモック：
+
+```yaml
+# wiremock/mappings/oci-object-storage.json
+{
+  "request": {
+    "method": "PUT",
+    "urlPattern": "/n/.*/b/.*/o/.*"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"message\": \"Object uploaded successfully\"}"
+  }
+}
+```
+
+### 3.4 採用された解決策：軽量Docker Compose構成
+
+現在の実装では、`docker-compose.test.minimal.yml` で以下の構成を採用：
+
+```yaml
+services:
+  # SOAP API Stub - WireMock
+  soap-stub:
+    image: wiremock/wiremock:latest
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./test-resources/wiremock/mappings:/home/wiremock/mappings:ro
+      - ./test-resources/wiremock/__files:/home/wiremock/__files:ro
+    command: ["--port", "8080", "--verbose"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/__admin/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - test-network
+
+  # Object Storage代替 - LocalStack (S3互換)
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - test-network
+
+  # 軽量テストデータベース - PostgreSQL
+  test-db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: testdb
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    volumes:
+      - ./scripts/init-postgresql.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge
+```
+
+### 3.5 テストコードの修正
+
+```java
+// 環境に応じた接続先切り替え
+@ConfigProperty(name = "oci.object-storage.endpoint", 
+                defaultValue = "http://localhost:4566") // LocalStack
+String objectStorageEndpoint;
+
+// テスト用の設定
+@Test
+void testObjectStorageWithLocalStack() {
+    // LocalStack接続設定
+    ObjectStorageClient client = ObjectStorageClient.builder()
+        .endpoint(objectStorageEndpoint)
+        .build();
+        
+    // テスト実行
+}
+```
+
+### 3.6 推奨アプローチ
+
+1. **開発段階**: **LocalStack** + **PostgreSQL** + **WireMock** を使用
+2. **CI/CD**: **Docker Compose軽量版** で自動テスト
+3. **統合テスト**: **docker-compose.test.minimal.yml** でサービス間通信テスト
+4. **本番デプロイ**: **実際のOCI環境** （本番アカウント）
+
+### 3.7 OCIアクセスが可能な場合
+
+Oracle Container Registryへのログインが可能な場合：
+
+```bash
+# Oracle Container Registryにログイン
+docker login container-registry.oracle.com
+
+# ユーザー名: Oracle Cloud ユーザー名
+# パスワード: Auth Token
+
+# その後、元のコマンドを実行
+docker run -d --name oci-local-testing \
+  -p 8080:8080 \
+  container-registry.oracle.com/oci/local-testing:latest
+```
+
+---
+
+## 4. 単体テスト仕様
 
 ### 3.1 実際のテストクラス構成
 ```
@@ -459,24 +647,20 @@ class VaultSecretServiceTest {
 
 ---
 
-## 4. 統合テスト仕様
+## 5. 統合テスト仕様
 
 ### 4.1 統合テスト一覧
 
 | テストクラス | テスト数 | 対象 | 実行条件 |
 |-------------|---------|------|---------|
-| AutonomousDatabaseIntegrationTest | 4個 | Autonomous Database TestContainer | `RUN_INTEGRATION_TESTS=true` |
-| OCILocalTestingIntegrationTest | 4個 | OCI Local Testing Framework | `RUN_INTEGRATION_TESTS=true` |
-| ObjectStorageIntegrationTest | 6個 | Object Storage統合機能 | `RUN_INTEGRATION_TESTS=true` |
-| ErrorHandlingIntegrationTest | 4個 | エラーハンドリング | 常時 |
-| ResilienceIntegrationTest | 3個 | Resilience4j機能 | 常時 |
+| DockerComposeIntegrationTest | 7個 | PostgreSQL + LocalStack + WireMock環境 | `RUN_INTEGRATION_TESTS=true` |
 
-### 4.2 新機能統合テストの特徴
-- **Object Storage統合**: OCI Local Testing Framework使用、アップロード・ダウンロード・削除・一覧機能
-- **リトライ機能**: Resilience4j指数バックオフ、最大試行回数、サーキットブレーカー
-- **エラーハンドリング**: カスタム例外、フォールバック処理、エラー率制限
-- **OCI認証**: インスタンスプリンシパル、設定ファイル認証の切り替え
-- **環境変数**: セキュリティ強化された設定での動作確認
+### 4.2 統合テスト環境の特徴
+- **PostgreSQL**: Oracle Database代替の軽量テストDB（15-alpine）
+- **LocalStack**: S3互換Object Storageエミュレーション
+- **WireMock**: SOAP APIスタブ・モックサーバー
+- **Docker Compose**: test-network上でサービス間通信テスト
+- **ヘルスチェック**: 各サービスの起動状態・可用性確認
 
 ### 4.3 Autonomous Database統合テスト
 
@@ -828,7 +1012,7 @@ class ResilienceIntegrationTest {
 
 ---
 
-## 5. テストデータ管理
+## 6. テストデータ管理
 
 ### 5.1 テスト設定ファイル
 
@@ -1005,7 +1189,7 @@ public class TestConfig {
 
 ---
 
-## 6. モック・スタブ管理
+## 7. モック・スタブ管理
 
 ### 6.1 モック戦略
 
@@ -1063,7 +1247,7 @@ void testOCIClientWithLocalTestingProfile() {
 
 ---
 
-## 7. テスト実行とレポート
+## 8. テスト実行とレポート
 
 ### 7.1 基本的なテスト実行
 
@@ -1152,7 +1336,7 @@ jobs:
 
 ---
 
-## 8. テストベストプラクティス
+## 9. テストベストプラクティス
 
 ### 8.1 テスト命名規則
 
@@ -1197,7 +1381,7 @@ jobs:
 
 ---
 
-## 9. 環境別テスト実行
+## 10. 環境別テスト実行
 
 ### 9.1 開発環境でのテスト実行
 
@@ -1272,7 +1456,7 @@ mvn test -Dtest=VaultIntegrationTest -DRUN_INTEGRATION_TESTS=true
 
 ---
 
-## 10. トラブルシューティング
+## 11. トラブルシューティング
 
 ### 10.1 よくあるテスト実行エラー
 

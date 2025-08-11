@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: csv-batch
+data:
+  # Application Configuration
+  csv.export.enabled: "true"
+  csv.export.storage-upload: "true"
+  csv.export.local-backup: "true"
+  csv.batch.size: "1000"
+  
+  # SOAP API Configuration
+  soap.api.url: "http://soap-stub-service:8080/ws"
+  soap.api.timeout.connection: "30000"
+  soap.api.timeout.read: "60000"
+  
+  # Resilience4j Configuration
+  resilience4j.retry.instances.soapService.max-attempts: "3"
+  resilience4j.retry.instances.soapService.wait-duration: "1000"
+  resilience4j.circuitbreaker.instances.soapService.failure-rate-threshold: "50"
+  resilience4j.circuitbreaker.instances.soapService.wait-duration-in-open-state: "10s"
+  
+  # Metrics Configuration
+  metrics.export.enabled: "true"
+  metrics.export.interval: "60000"
+  
+  # Health Check Configuration
+  health.checks.enabled: "true"
+  health.checks.database.enabled: "true"
+  health.checks.objectstorage.enabled: "true"
+  
+  # Logging Configuration
+  logging.level: "INFO"
+  logging.level.com.example.csvbatch: "DEBUG"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oci-config
+  namespace: csv-batch
+data:
+  region: "us-ashburn-1"
+  namespace: "your-oci-namespace"
+  bucket: "csv-export-bucket"
+  prefix: "exports/"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jvm-config
+  namespace: csv-batch
+data:
+  # JVM Configuration for Production
+  JAVA_OPTS: >-
+    -server
+    -Xms1g -Xmx4g
+    -XX:+UseG1GC
+    -XX:+UseContainerSupport
+    -XX:MaxRAMPercentage=75.0
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+PrintGCDetails
+    -XX:+PrintGCTimeStamps
+    -Xloggc:/app/logs/gc.log
+    -XX:+UseGCLogFileRotation
+    -XX:NumberOfGCLogFiles=10
+    -XX:GCLogFileSize=10M
+    -Djava.security.egd=file:/dev/./urandom
+    -Duser.timezone=Asia/Tokyo
+    -Dfile.encoding=UTF-8

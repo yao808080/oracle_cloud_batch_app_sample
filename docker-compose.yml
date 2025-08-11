@@ -1,0 +1,46 @@
+services:
+  postgres-db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=testdb
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpass
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - csv-batch-network
+    restart: unless-stopped
+
+  soap-stub:
+    image: wiremock/wiremock:latest
+    ports:
+      - "8081:8080"
+    volumes:
+      - "${PWD}/test-resources/wiremock/mappings:/home/wiremock/mappings:ro"
+      - "${PWD}/test-resources/wiremock/__files:/home/wiremock/__files:ro"
+    command: ["--port", "8080", "--verbose"]
+    networks:
+      - csv-batch-network
+    restart: unless-stopped
+
+  # OCI Emulator (OCIサービスローカルエミュレーション)
+  oci-emulator:
+    image: cameritelabs/oci-emulator:latest
+    ports:
+      - "12000:12000"
+    environment:
+      - OCI_NAMESPACE=test-namespace
+      - OCI_COMPARTMENT_ID=ocid1.compartment.oc1..test
+    networks:
+      - csv-batch-network
+    restart: unless-stopped
+
+
+volumes:
+  postgres-data:
+
+networks:
+  csv-batch-network:
+    driver: bridge
